@@ -1,6 +1,12 @@
 import Link from "next/link";
 import { notFound } from "next/navigation";
-import { ArrowLeft, FileSpreadsheet, AlertCircle, Clock } from "lucide-react";
+import {
+  ArrowLeft,
+  FileSpreadsheet,
+  AlertCircle,
+  Clock,
+  TrendingUp,
+} from "lucide-react";
 import { getShowById } from "@/lib/queries";
 import {
   Card,
@@ -12,12 +18,24 @@ import {
 } from "@/components/ui/card";
 import { StatusBadge, DealTypeBadge, PlainBadge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import { parseBonuses } from "@/lib/dealMath";
 import {
   formatMoney,
   formatMoneyCompact,
   formatShowDateFull,
   relativeShowDate,
 } from "@/lib/format";
+import type { Bonus } from "@/db/schema";
+
+const COMP_LABELS: Record<string, string> = {
+  artist_gl: "Artist guest list",
+  label: "Label / management",
+  press: "Press",
+  venue_staff: "Venue staff",
+  sponsor: "Sponsor",
+  promo: "Promo / radio",
+  other: "Other",
+};
 
 export default async function ShowDetailPage({
   params,
@@ -28,8 +46,17 @@ export default async function ShowDetailPage({
   const data = await getShowById(id);
   if (!data) notFound();
 
-  const { show, artist, agent, agency, deal, settlement, ticketSales, expenses } =
-    data;
+  const {
+    show,
+    artist,
+    agent,
+    agency,
+    deal,
+    settlement,
+    ticketSales,
+    expenses,
+    comps,
+  } = data;
 
   const grossSoFar = ticketSales.reduce((sum, t) => sum + t.gross, 0);
   const totalFees = ticketSales.reduce((sum, t) => sum + t.fees, 0);
@@ -40,6 +67,13 @@ export default async function ShowDetailPage({
   const absorbedTotal = expenses
     .filter((e) => e.absorbedByVenue)
     .reduce((sum, e) => sum + e.amount, 0);
+
+  const totalCompCount = comps.reduce((s, c) => s + c.count, 0);
+  const compsCountingTowardGross = comps
+    .filter((c) => c.countsTowardGross)
+    .reduce((s, c) => s + c.count, 0);
+
+  const bonuses = deal ? parseBonuses(deal) : [];
 
   return (
     <div className="px-10 py-8 max-w-5xl">
@@ -58,6 +92,11 @@ export default async function ShowDetailPage({
             {deal && <DealTypeBadge type={deal.dealType} />}
             {settlement?.status === "disputed" && (
               <PlainBadge variant="rose">Disputed</PlainBadge>
+            )}
+            {bonuses.length > 0 && (
+              <PlainBadge variant="brand">
+                {bonuses.length} bonus{bonuses.length === 1 ? "" : "es"}
+              </PlainBadge>
             )}
           </div>
           <h1 className="text-[32px] font-semibold text-ink-900 tracking-tight leading-none">
@@ -81,7 +120,6 @@ export default async function ShowDetailPage({
         </Link>
       </div>
 
-      {/* Internal notes — only on shows that have them (e.g. the Coastal Spell dispute) */}
       {show.internalNotes && (
         <div className="mb-5 rounded-lg bg-amber-50 ring-1 ring-amber-200 p-4 flex gap-3">
           <AlertCircle className="h-4 w-4 text-amber-700 mt-0.5 shrink-0" />
@@ -97,7 +135,7 @@ export default async function ShowDetailPage({
       )}
 
       <div className="grid grid-cols-1 md:grid-cols-3 gap-5">
-        {/* Deal terms */}
+        {/* Deal terms (now with bonuses sub-section) */}
         <Card className="md:col-span-2">
           <CardHeader>
             <div>
@@ -150,6 +188,37 @@ export default async function ShowDetailPage({
                     }
                   />
                 </div>
+
+                {/* Structured bonuses */}
+                {bonuses.length > 0 && (
+                  <div className="rounded-lg ring-1 ring-brand-200 bg-brand-50/40 p-3.5">
+                    <div className="flex items-center gap-1.5 mb-2">
+                      <TrendingUp className="h-3.5 w-3.5 text-brand-700" />
+                      <div className="text-[10.5px] font-semibold uppercase tracking-wider text-brand-800">
+                        Bonuses & escalators (structured)
+                      </div>
+                    </div>
+                    <ul className="space-y-2">
+                      {bonuses.map((b, i) => (
+                        <li
+                          key={i}
+                          className="text-[12.5px] text-ink-800 flex items-start gap-2"
+                        >
+                          <BonusBadge type={b.type} />
+                          <span className="leading-relaxed">{b.label}</span>
+                        </li>
+                      ))}
+                    </ul>
+                    <div className="text-[11px] text-ink-500 mt-2.5 leading-snug">
+                      Stored in{" "}
+                      <code className="font-mono text-[10px] bg-white px-1 py-0.5 rounded ring-1 ring-ink-200">
+                        bonuses_json
+                      </code>
+                      . The in-app tool only reads structured bonuses — anything
+                      in the prose below is invisible to it.
+                    </div>
+                  </div>
+                )}
 
                 {deal.dealNotesFreetext && (
                   <div>
@@ -209,7 +278,7 @@ export default async function ShowDetailPage({
           </CardContent>
         </Card>
 
-        {/* Box office — fixed: real ticket counts, no more "1 sale event" weirdness */}
+        {/* Box office */}
         <Card>
           <CardHeader>
             <CardTitle>Box office</CardTitle>
@@ -251,8 +320,83 @@ export default async function ShowDetailPage({
           </CardContent>
         </Card>
 
-        {/* Expenses */}
+        {/* Comps */}
         <Card className="md:col-span-2">
+          <CardHeader>
+            <div>
+              <CardTitle>Comps</CardTitle>
+              <CardDescription>
+                {totalCompCount} comp tickets across {comps.length}{" "}
+                categor{comps.length === 1 ? "y" : "ies"}.
+                {compsCountingTowardGross > 0 && (
+                  <>
+                    {" "}
+                    <span className="text-amber-700 font-medium">
+                      {compsCountingTowardGross} count toward gross.
+                    </span>
+                  </>
+                )}
+              </CardDescription>
+            </div>
+            <PlainBadge variant="default">
+              {totalCompCount} total
+            </PlainBadge>
+          </CardHeader>
+          <CardContent>
+            {comps.length === 0 ? (
+              <div className="text-[13px] text-ink-500">
+                No comps recorded for this show.
+              </div>
+            ) : (
+              <table className="w-full text-[13px]">
+                <thead>
+                  <tr className="text-left text-[10.5px] uppercase tracking-wider text-ink-500 border-b border-ink-100">
+                    <th className="py-2 font-medium">Category</th>
+                    <th className="py-2 font-medium text-right">Count</th>
+                    <th className="py-2 font-medium text-right">
+                      Face value
+                    </th>
+                    <th className="py-2 font-medium text-right">
+                      Counts toward gross?
+                    </th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-ink-100">
+                  {comps.map((c) => (
+                    <tr key={c.id}>
+                      <td className="py-2">
+                        {COMP_LABELS[c.category] ?? c.category}
+                        {c.notes && (
+                          <span className="text-ink-500 ml-1">
+                            · {c.notes}
+                          </span>
+                        )}
+                      </td>
+                      <td className="py-2 text-right font-mono tabular">
+                        {c.count}
+                      </td>
+                      <td className="py-2 text-right font-mono tabular text-ink-500">
+                        {formatMoney(c.faceValue * c.count)}
+                      </td>
+                      <td className="py-2 text-right">
+                        {c.countsTowardGross ? (
+                          <span className="text-amber-700 font-medium">
+                            Yes
+                          </span>
+                        ) : (
+                          <span className="text-ink-500">No</span>
+                        )}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            )}
+          </CardContent>
+        </Card>
+
+        {/* Expenses */}
+        <Card className="md:col-span-3">
           <CardHeader>
             <div>
               <CardTitle>Expenses</CardTitle>
@@ -314,5 +458,19 @@ export default async function ShowDetailPage({
         </Card>
       </div>
     </div>
+  );
+}
+
+function BonusBadge({ type }: { type: Bonus["type"] }) {
+  const labels: Record<Bonus["type"], string> = {
+    gross_threshold: "gross",
+    sellout: "sellout",
+    attendance_threshold: "attend",
+    tier_ratchet: "ratchet",
+  };
+  return (
+    <span className="inline-flex shrink-0 items-center px-1.5 py-px rounded text-[9.5px] font-mono uppercase tracking-wider bg-white ring-1 ring-brand-200 text-brand-800">
+      {labels[type]}
+    </span>
   );
 }

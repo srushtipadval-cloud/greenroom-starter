@@ -4,9 +4,14 @@
  * Generates ~370 shows across 18 months at The Crescent, with realistic:
  *   - artist tiers (draw size distributions)
  *   - deal type mix (flat 25%, vs 50%, percentage_of_net 15%, door 5%, percentage_of_gross 5%)
+ *   - bonus structures (~30% of vs / % of net deals; mix of gross thresholds, sellout bonuses,
+ *     attendance thresholds, and tier ratchets — some duplicated in prose, some only in prose)
  *   - sell-through variance
+ *   - comps per show (artist GL, label, press, venue staff, sponsor, promo)
  *   - expense breakdowns
  *   - past settlements with deal-aware math
+ *   - settlement lifecycle stages (draft → submitted → in_review → signed/disputed → revised → finalized → paid)
+ *   - recoup line items on ~30% of past settlements (some agreed, some disputed)
  *
  * Specific narrative shows are injected by hand:
  *   - The Coastal Spell / WME dispute (March 14, 2025) referenced in
@@ -25,8 +30,12 @@ import {
   shows,
   deals,
   ticketSales,
+  comps,
   expenses,
   settlements,
+  type Bonus,
+  type Recoup,
+  type SettlementStage,
 } from "./schema";
 
 // -------- Deterministic RNG --------
@@ -59,7 +68,16 @@ const VENUE_ID = "venue_crescent";
 const VENUE_CAPACITY = 650;
 const MARIANA_ID = "user_mariana";
 const MARCUS_ID = "user_marcus";
-const TODAY = new Date("2026-02-01");
+// TODAY is dynamic — anchored on the moment the seed is run. This keeps the
+// product feeling current no matter when the candidate clones the repo. The
+// Coastal Spell dispute below is hardcoded to a fixed historical date (March 14, 2025)
+// because the email thread references it specifically; that show stays
+// well in the past regardless of when the seed is regenerated.
+const TODAY = (() => {
+  const d = new Date();
+  d.setHours(0, 0, 0, 0);
+  return d;
+})();
 
 interface ArtistDef {
   id: string;
@@ -195,8 +213,95 @@ interface GeneratedDeal {
   percentageBasis: "gross" | "net" | null;
   expenseCap: number | null;
   hospitalityCap: number | null;
-  bonuses: { thresholdGross: number; amount: number; stacks: boolean }[] | null;
+  bonuses: Bonus[] | null;
+  // Whether bonusesJson contains structures that the deal_notes_freetext also
+  // describes. When false, the prose mentions things the structured form is
+  // missing — a deliberate part of the seam.
+  bonusesAlsoInProse: boolean;
   notes: string;
+}
+
+function generateBonuses(tier: ArtistDef["tier"], baseGuarantee: number): Bonus[] | null {
+  const has = rnd() < (tier === "A" ? 0.65 : tier === "B" ? 0.35 : tier === "C" ? 0.15 : 0.05);
+  if (!has) return null;
+
+  const bonusType = weighted<"gross_threshold" | "gross_double" | "sellout" | "attendance" | "tier_ratchet">([
+    { value: "gross_threshold", weight: 5 },
+    { value: "gross_double", weight: 2 },
+    { value: "sellout", weight: 2 },
+    { value: "attendance", weight: 1 },
+    { value: "tier_ratchet", weight: 1 },
+  ]);
+
+  const out: Bonus[] = [];
+  switch (bonusType) {
+    case "gross_threshold": {
+      const threshold = Math.round((baseGuarantee * 4) / 1000) * 1000;
+      const amount = Math.round((baseGuarantee * 0.15) / 50) * 50;
+      out.push({
+        type: "gross_threshold",
+        label: `+$${amount.toLocaleString()} if gross > $${threshold.toLocaleString()}`,
+        threshold,
+        amount,
+        stacks: rnd() < 0.5,
+      });
+      break;
+    }
+    case "gross_double": {
+      const t1 = Math.round((baseGuarantee * 4) / 1000) * 1000;
+      const t2 = Math.round((baseGuarantee * 5.5) / 1000) * 1000;
+      const a1 = Math.round((baseGuarantee * 0.15) / 50) * 50;
+      const a2 = Math.round((baseGuarantee * 0.15) / 50) * 50;
+      out.push({
+        type: "gross_threshold",
+        label: `+$${a1.toLocaleString()} if gross > $${t1.toLocaleString()}`,
+        threshold: t1,
+        amount: a1,
+        stacks: true,
+      });
+      out.push({
+        type: "gross_threshold",
+        label: `+$${a2.toLocaleString()} if gross > $${t2.toLocaleString()}`,
+        threshold: t2,
+        amount: a2,
+        stacks: true,
+      });
+      break;
+    }
+    case "sellout": {
+      const amount = Math.round((baseGuarantee * 0.2) / 100) * 100;
+      out.push({
+        type: "sellout",
+        label: `+$${amount.toLocaleString()} on sellout`,
+        amount,
+      });
+      break;
+    }
+    case "attendance": {
+      const threshold = Math.round(VENUE_CAPACITY * 0.9);
+      const amount = Math.round((baseGuarantee * 0.18) / 50) * 50;
+      out.push({
+        type: "attendance_threshold",
+        label: `+$${amount.toLocaleString()} if attendance > ${threshold}`,
+        threshold,
+        amount,
+      });
+      break;
+    }
+    case "tier_ratchet": {
+      const breakpoint = Math.round((baseGuarantee * 4) / 1000) * 1000;
+      out.push({
+        type: "tier_ratchet",
+        label: `Tiered net split: 60% / 70% over $${breakpoint.toLocaleString()}`,
+        tiers: [
+          { from: 0, to: breakpoint, percentage: 0.6 },
+          { from: breakpoint, to: null, percentage: 0.7 },
+        ],
+      });
+      break;
+    }
+  }
+  return out;
 }
 
 function generateDeal(tier: ArtistDef["tier"]): GeneratedDeal {
@@ -216,7 +321,18 @@ function generateDeal(tier: ArtistDef["tier"]): GeneratedDeal {
   }[tier];
 
   switch (dealType) {
-    case "flat":
+    case "flat": {
+      // Flat deals occasionally have a sellout bonus
+      const bonuses =
+        rnd() < 0.15
+          ? ([
+              {
+                type: "sellout" as const,
+                label: `+$${Math.round(baseGuarantee * 0.2 / 100) * 100} on sellout`,
+                amount: Math.round((baseGuarantee * 0.2) / 100) * 100,
+              },
+            ] as Bonus[])
+          : null;
       return {
         type: "flat",
         guaranteeAmount: baseGuarantee,
@@ -224,28 +340,26 @@ function generateDeal(tier: ArtistDef["tier"]): GeneratedDeal {
         percentageBasis: null,
         expenseCap: null,
         hospitalityCap: null,
-        bonuses: null,
-        notes: rnd() < 0.5
-          ? `Flat $${baseGuarantee}. No upside.`
-          : `Flat guarantee $${baseGuarantee}. ${choose(["Weeknight slot.", "Tour routing fill, no expenses.", "Local/regional act.", "Buyout deal."])}`,
+        bonuses,
+        bonusesAlsoInProse: bonuses !== null && rnd() < 0.6,
+        notes: bonuses
+          ? `Flat $${baseGuarantee.toLocaleString()} + $${(bonuses[0] as { amount: number }).amount} on sellout. ${choose(["No expenses.", "Buyout deal.", "Tour routing."])}`
+          : rnd() < 0.5
+            ? `Flat $${baseGuarantee.toLocaleString()}. No upside.`
+            : `Flat guarantee $${baseGuarantee.toLocaleString()}. ${choose(["Weeknight slot.", "Tour routing fill, no expenses.", "Local/regional act.", "Buyout deal."])}`,
       };
+    }
     case "vs": {
       const pct = choose([0.7, 0.75, 0.8, 0.85, 0.85, 0.85, 0.9]);
       const expenseCap = Math.round((baseGuarantee * 0.5) / 50) * 50;
       const hospitalityCap = choose([300, 400, 500, 600]);
-      const hasBonus = rnd() < (tier === "A" ? 0.6 : tier === "B" ? 0.3 : 0.1);
-      const bonuses = hasBonus
-        ? [
-            {
-              thresholdGross: Math.round((baseGuarantee * 4) / 1000) * 1000,
-              amount: Math.round((baseGuarantee * 0.15) / 50) * 50,
-              stacks: rnd() < 0.7,
-            },
-            ...(rnd() < 0.5
-              ? [{ thresholdGross: Math.round((baseGuarantee * 5.5) / 1000) * 1000, amount: Math.round((baseGuarantee * 0.15) / 50) * 50, stacks: true }]
-              : []),
-          ]
-        : null;
+      const bonuses = generateBonuses(tier, baseGuarantee);
+      // ~30% of the time, the structured bonuses are present but the prose
+      // describes them slightly differently or adds a condition the structured
+      // form can't capture. ~20% of the time, bonuses exist only in prose.
+      const bonusesAlsoInProse = bonuses !== null && rnd() < 0.7;
+      const bonusesProseOnly = bonuses === null && rnd() < 0.2;
+
       return {
         type: "vs",
         guaranteeAmount: baseGuarantee,
@@ -254,12 +368,21 @@ function generateDeal(tier: ArtistDef["tier"]): GeneratedDeal {
         expenseCap,
         hospitalityCap,
         bonuses,
-        notes: generateVsDealNotes(baseGuarantee, pct, expenseCap, hospitalityCap, bonuses),
+        bonusesAlsoInProse,
+        notes: generateVsDealNotes(
+          baseGuarantee,
+          pct,
+          expenseCap,
+          hospitalityCap,
+          bonusesAlsoInProse ? bonuses : null,
+          bonusesProseOnly,
+        ),
       };
     }
     case "percentage_of_net": {
       const pct = choose([0.8, 0.85, 0.85, 0.9]);
       const expenseCap = Math.round((baseGuarantee * 0.6) / 50) * 50;
+      const bonuses = rnd() < 0.2 ? generateBonuses(tier, baseGuarantee) : null;
       return {
         type: "percentage_of_net",
         guaranteeAmount: null,
@@ -267,8 +390,11 @@ function generateDeal(tier: ArtistDef["tier"]): GeneratedDeal {
         percentageBasis: "net",
         expenseCap,
         hospitalityCap: choose([300, 400, 500]),
-        bonuses: null,
-        notes: `${(pct * 100).toFixed(0)}% of net after expenses. Expenses capped $${expenseCap}. No guarantee.`,
+        bonuses,
+        bonusesAlsoInProse: bonuses !== null && rnd() < 0.6,
+        notes: `${(pct * 100).toFixed(0)}% of net after expenses. Expenses capped $${expenseCap}. No guarantee.${
+          bonuses ? ` ${bonuses[0].label}.` : ""
+        }`,
       };
     }
     case "door": {
@@ -281,11 +407,22 @@ function generateDeal(tier: ArtistDef["tier"]): GeneratedDeal {
         expenseCap,
         hospitalityCap: choose([200, 300]),
         bonuses: null,
+        bonusesAlsoInProse: false,
         notes: `Door deal. Artist gets ticket revenue minus expenses (capped $${expenseCap}). DIY/experimental tour.`,
       };
     }
     case "percentage_of_gross": {
       const pct = choose([0.7, 0.75, 0.8]);
+      const bonuses =
+        rnd() < 0.25
+          ? ([
+              {
+                type: "sellout" as const,
+                label: `+$${Math.round(baseGuarantee * 0.15 / 100) * 100} on sellout`,
+                amount: Math.round((baseGuarantee * 0.15) / 100) * 100,
+              },
+            ] as Bonus[])
+          : null;
       return {
         type: "percentage_of_gross",
         guaranteeAmount: null,
@@ -293,8 +430,11 @@ function generateDeal(tier: ArtistDef["tier"]): GeneratedDeal {
         percentageBasis: "gross",
         expenseCap: null,
         hospitalityCap: null,
-        bonuses: null,
-        notes: `${(pct * 100).toFixed(0)}% of gross. No expense deductions. Simple split deal.`,
+        bonuses,
+        bonusesAlsoInProse: bonuses !== null && rnd() < 0.5,
+        notes: `${(pct * 100).toFixed(0)}% of gross. No expense deductions. Simple split deal.${
+          bonuses ? ` Sellout bonus per the email.` : ""
+        }`,
       };
     }
   }
@@ -305,27 +445,22 @@ function generateVsDealNotes(
   pct: number,
   expenseCap: number,
   hospitalityCap: number,
-  bonuses: { thresholdGross: number; amount: number; stacks: boolean }[] | null,
+  bonuses: Bonus[] | null,
+  bonusesProseOnly: boolean,
 ): string {
+  const bonusProseSnippet = bonuses
+    ? ` ${bonuses.map((b) => b.label).join("; ")}.`
+    : bonusesProseOnly
+      ? ` Performance bonuses per the deal memo (see email thread).`
+      : "";
+
   const variants = [
     () =>
-      `$${guarantee} guarantee vs ${(pct * 100).toFixed(0)}% of net after expenses, whichever greater. Expenses capped $${expenseCap}. Hospitality cap $${hospitalityCap}.${
-        bonuses
-          ? ` Bonus: +$${bonuses[0].amount} if gross > $${bonuses[0].thresholdGross}${
-              bonuses.length > 1
-                ? `, additional +$${bonuses[1].amount} if gross > $${bonuses[1].thresholdGross}`
-                : ""
-            }${bonuses[0].stacks ? ". Bonuses stack." : ""}`
-          : ""
-      }`,
+      `$${guarantee.toLocaleString()} guarantee vs ${(pct * 100).toFixed(0)}% of net after expenses, whichever greater. Expenses capped $${expenseCap}. Hospitality cap $${hospitalityCap}.${bonusProseSnippet}`,
     () =>
-      `Deal: $${guarantee} vs ${(pct * 100).toFixed(0)}/${((1 - pct) * 100).toFixed(0)} after expenses. Expense cap ${expenseCap}, hospitality cap ${hospitalityCap}.${
-        bonuses ? ` Hits at ${bonuses[0].thresholdGross} gross trigger +${bonuses[0].amount}.` : ""
-      }`,
+      `Deal: $${guarantee.toLocaleString()} vs ${(pct * 100).toFixed(0)}/${((1 - pct) * 100).toFixed(0)} after expenses. Expense cap ${expenseCap}, hospitality cap ${hospitalityCap}.${bonusProseSnippet}`,
     () =>
-      `${guarantee} g'tee vs ${(pct * 100).toFixed(0)}% of net. Expenses to ${expenseCap}. Hospitality $${hospitalityCap}.${
-        bonuses ? ` Performance escalators per the deal memo${bonuses[0].stacks ? " (stacking)" : ""}.` : ""
-      }`,
+      `${guarantee.toLocaleString()} g'tee vs ${(pct * 100).toFixed(0)}% of net. Expenses to ${expenseCap}. Hospitality $${hospitalityCap}.${bonusProseSnippet}`,
   ];
   return choose(variants)();
 }
@@ -334,6 +469,65 @@ function generateSellThrough(tier: ArtistDef["tier"]): number {
   const base = { A: 0.85, B: 0.65, C: 0.45, D: 0.25 }[tier];
   const variance = (rnd() - 0.5) * 0.4;
   return Math.max(0.05, Math.min(1.0, base + variance));
+}
+
+// -------- Comps generation --------
+
+function generateComps(showId: string, tier: ArtistDef["tier"], avgPrice: number) {
+  type CompRow = typeof comps.$inferInsert;
+  const result: CompRow[] = [];
+  let i = 0;
+  const add = (
+    category: CompRow["category"],
+    count: number,
+    countsTowardGross = false,
+    notes: string | null = null,
+  ) => {
+    if (count === 0) return;
+    result.push({
+      id: `comp_${showId}_${i++}`,
+      showId,
+      category,
+      count,
+      faceValue: avgPrice,
+      countsTowardGross,
+      notes,
+    });
+  };
+
+  // Artist guest list — scales with tier draw
+  const glCount = { A: rndInt(15, 28), B: rndInt(10, 20), C: rndInt(6, 14), D: rndInt(3, 10) }[tier];
+  add("artist_gl", glCount);
+
+  // Label / management — only for bigger acts, mostly
+  if (tier === "A" || tier === "B") {
+    add("label", rndInt(2, 8));
+  } else if (rnd() < 0.3) {
+    add("label", rndInt(1, 3));
+  }
+
+  // Press
+  if (tier !== "D" || rnd() < 0.4) {
+    add("press", rndInt(2, 5));
+  }
+
+  // Venue staff
+  add("venue_staff", rndInt(3, 8));
+
+  // Sponsor (rare)
+  if (rnd() < 0.15) add("sponsor", rndInt(2, 5));
+
+  // Promo (radio giveaways, 2-for-1s, etc.)
+  if (rnd() < 0.25) {
+    add(
+      "promo",
+      rndInt(4, 12),
+      rnd() < 0.3, // sometimes promo comps DO count toward gross at face
+      choose(["Radio giveaway", "2-for-1 Tuesday promo", "Spotify pre-save campaign"]),
+    );
+  }
+
+  return result;
 }
 
 function generateExpenses(showId: string) {
@@ -370,6 +564,178 @@ function generateExpenses(showId: string) {
   return result;
 }
 
+// -------- Recoups generation --------
+
+function generateRecoups(
+  showId: string,
+  marketingExpense: number,
+  hospitalityCap: number | null,
+  hospitalityTotal: number,
+): Recoup[] | null {
+  // ~30% of past settlements have at least one recoup line item
+  if (rnd() > 0.3) return null;
+
+  const result: Recoup[] = [];
+  let id = 0;
+
+  // Marketing recoup — when there's marketing spend
+  if (marketingExpense > 200 && rnd() < 0.5) {
+    const amount = Math.round(marketingExpense * (0.5 + rnd() * 0.5));
+    result.push({
+      id: `recoup_${showId}_${id++}`,
+      category: "marketing",
+      label: choose(["Co-op marketing spend", "Pre-show ad spend", "Spotify ad recoup"]),
+      amount,
+      status: rnd() < 0.85 ? "agreed" : "disputed",
+    });
+  }
+
+  // Hospitality overage — when hospitality exceeded the cap
+  if (hospitalityCap != null && hospitalityTotal > hospitalityCap && rnd() < 0.7) {
+    const overage = Math.round(hospitalityTotal - hospitalityCap);
+    if (overage >= 50) {
+      result.push({
+        id: `recoup_${showId}_${id++}`,
+        category: "hospitality_overage",
+        label: `Over $${hospitalityCap} hospitality cap`,
+        amount: overage,
+        status: rnd() < 0.7 ? "agreed" : "disputed",
+      });
+    }
+  }
+
+  // Production overage (rarer)
+  if (rnd() < 0.15) {
+    result.push({
+      id: `recoup_${showId}_${id++}`,
+      category: "production_overage",
+      label: choose(["Sound: extra mic pkg added", "Lights: programmer add'l night", "Backline: drum riser"]),
+      amount: rndInt(100, 400),
+      status: rnd() < 0.6 ? "agreed" : "disputed",
+    });
+  }
+
+  // Prior advance (very rare)
+  if (rnd() < 0.05) {
+    result.push({
+      id: `recoup_${showId}_${id++}`,
+      category: "prior_advance",
+      label: "Tour advance, March",
+      amount: rndInt(500, 2000),
+      status: "agreed",
+    });
+  }
+
+  return result.length > 0 ? result : null;
+}
+
+// -------- Settlement lifecycle --------
+
+function pickSettlementStage(daysAgo: number): SettlementStage {
+  // The older the show, the more likely it's fully paid
+  if (daysAgo > 60) {
+    return weighted<SettlementStage>([
+      { value: "paid", weight: 90 },
+      { value: "finalized", weight: 4 },
+      { value: "disputed", weight: 4 }, // long-running disputes
+      { value: "voided", weight: 2 },
+    ]);
+  }
+  if (daysAgo > 21) {
+    return weighted<SettlementStage>([
+      { value: "paid", weight: 60 },
+      { value: "finalized", weight: 20 },
+      { value: "signed", weight: 12 },
+      { value: "disputed", weight: 6 },
+      { value: "revised", weight: 2 },
+    ]);
+  }
+  if (daysAgo > 7) {
+    return weighted<SettlementStage>([
+      { value: "paid", weight: 25 },
+      { value: "finalized", weight: 25 },
+      { value: "signed", weight: 30 },
+      { value: "in_review", weight: 10 },
+      { value: "disputed", weight: 8 },
+      { value: "revised", weight: 2 },
+    ]);
+  }
+  if (daysAgo > 2) {
+    return weighted<SettlementStage>([
+      { value: "signed", weight: 25 },
+      { value: "in_review", weight: 30 },
+      { value: "submitted", weight: 25 },
+      { value: "disputed", weight: 8 },
+      { value: "revised", weight: 4 },
+      { value: "draft", weight: 8 },
+    ]);
+  }
+  return weighted<SettlementStage>([
+    { value: "draft", weight: 50 },
+    { value: "submitted", weight: 30 },
+    { value: "in_review", weight: 15 },
+    { value: "signed", weight: 5 },
+  ]);
+}
+
+function settlementTimestamps(stage: SettlementStage, showDate: Date) {
+  // Show happened on showDate. Settlement starts as draft same night,
+  // submitted next morning, reviewed within a day, signed within 2-3 days,
+  // paid within 5-7 days. Disputes extend the timeline.
+  const ts: Partial<Record<
+    | "draftedAt"
+    | "submittedAt"
+    | "reviewStartedAt"
+    | "signedAt"
+    | "disputedAt"
+    | "revisedAt"
+    | "finalizedAt"
+    | "paidAt",
+    Date
+  >> = {};
+  const addHours = (base: Date, hrs: number) => {
+    const d = new Date(base);
+    d.setHours(d.getHours() + hrs);
+    return d;
+  };
+
+  // Always have draftedAt
+  ts.draftedAt = addHours(showDate, 5); // ~2am after the show
+
+  const orderedStages: SettlementStage[] = [
+    "draft",
+    "submitted",
+    "in_review",
+    "signed",
+    "disputed",
+    "revised",
+    "finalized",
+    "paid",
+  ];
+
+  const stageIndex = orderedStages.indexOf(stage);
+  if (stageIndex === -1) return ts; // voided — only draftedAt
+
+  if (stageIndex >= 1) ts.submittedAt = addHours(showDate, 18);
+  if (stageIndex >= 2) ts.reviewStartedAt = addHours(showDate, 30);
+  if (stage === "signed" || (stageIndex >= 3 && stage !== "disputed")) {
+    ts.signedAt = addHours(showDate, 60);
+  }
+  // Disputed path: set disputedAt for any settlement that went through dispute.
+  // Some "paid" and "finalized" settlements went through dispute; some didn't.
+  if (stage === "disputed" || stage === "revised") {
+    ts.disputedAt = addHours(showDate, 48);
+  }
+  if (stage === "revised" || stage === "finalized" || stage === "paid") {
+    ts.revisedAt = addHours(showDate, 72);
+    ts.finalizedAt = addHours(showDate, 96);
+  }
+  if (stage === "paid") {
+    ts.paidAt = addHours(showDate, 24 * 7);
+  }
+  return ts;
+}
+
 function computeSettlement(
   deal: GeneratedDeal,
   gross: number,
@@ -392,9 +758,14 @@ function computeSettlement(
       const pctPayout = netAfterExpenses * (deal.percentage ?? 0);
       const guarantee = deal.guaranteeAmount ?? 0;
       const base = Math.max(guarantee, pctPayout);
-      const bonusPayout = deal.bonuses?.filter((b) => gross >= b.thresholdGross).reduce((s, b) => s + b.amount, 0) ?? 0;
-      const bonusesApply = pctPayout >= guarantee || (deal.bonuses?.[0]?.stacks ?? false);
-      return base + (bonusesApply ? bonusPayout : 0);
+      // Apply gross-threshold bonuses
+      const bonusPayout =
+        deal.bonuses
+          ?.filter((b) => b.type === "gross_threshold")
+          .filter((b) => gross >= b.threshold)
+          .reduce((s, b) => s + b.amount, 0) ?? 0;
+      const overrideGuarantee = pctPayout >= guarantee;
+      return base + (overrideGuarantee ? bonusPayout : 0);
     }
     case "door": {
       const cappedExpenses = Math.min(passThruExpenses, deal.expenseCap ?? Infinity);
@@ -414,6 +785,7 @@ async function main() {
 
   await db.delete(settlements);
   await db.delete(expenses);
+  await db.delete(comps);
   await db.delete(ticketSales);
   await db.delete(deals);
   await db.delete(shows);
@@ -448,6 +820,7 @@ async function main() {
   const showsToInsert: (typeof shows.$inferInsert)[] = [];
   const dealsToInsert: (typeof deals.$inferInsert)[] = [];
   const ticketSalesToInsert: (typeof ticketSales.$inferInsert)[] = [];
+  const compsToInsert: (typeof comps.$inferInsert)[] = [];
   const expensesToInsert: (typeof expenses.$inferInsert)[] = [];
   const settlementsToInsert: (typeof settlements.$inferInsert)[] = [];
 
@@ -458,6 +831,12 @@ async function main() {
     const dow = d.getDay();
     if ((dow === 0 || dow === 1) && rnd() > 0.25) continue;
     datePool.push(dateOffset(off));
+  }
+  // Shuffle so shows distribute across the full window — otherwise the
+  // earliest dates fill up first and the recent weeks have no shows.
+  for (let i = datePool.length - 1; i > 0; i--) {
+    const j = Math.floor(rnd() * (i + 1));
+    [datePool[i], datePool[j]] = [datePool[j], datePool[i]];
   }
 
   const artistPool: ArtistDef[] = [];
@@ -475,7 +854,11 @@ async function main() {
     const date = datePool[i];
     const artist = artistPool[i];
     const showId = `show_${i.toString().padStart(4, "0")}`;
-    const isPast = new Date(date) < TODAY;
+    const showDate = new Date(date);
+    const isPast = showDate < TODAY;
+    const daysAgo = Math.floor((TODAY.getTime() - showDate.getTime()) / (1000 * 60 * 60 * 24));
+
+    const avgPrice = artist.tier === "A" ? 32 : artist.tier === "B" ? 26 : artist.tier === "C" ? 20 : 15;
 
     showsToInsert.push({
       id: showId,
@@ -508,10 +891,12 @@ async function main() {
       createdAt: new Date(date),
     });
 
+    // Comps for every show (past or upcoming)
+    compsToInsert.push(...generateComps(showId, artist.tier, avgPrice));
+
     if (isPast) {
       const sellThrough = generateSellThrough(artist.tier);
       const ticketCount = Math.round(VENUE_CAPACITY * sellThrough);
-      const avgPrice = artist.tier === "A" ? 32 : artist.tier === "B" ? 26 : artist.tier === "C" ? 20 : 15;
       const gross = Math.round(ticketCount * avgPrice * (0.9 + rnd() * 0.2));
       const fees = Math.round(gross * 0.1);
 
@@ -530,17 +915,46 @@ async function main() {
       const passThru = showExpenses.filter((e) => !e.absorbedByVenue).reduce((s, e) => s + e.amount, 0);
       const totalToArtist = computeSettlement(deal, gross, fees, passThru);
 
+      const stage = pickSettlementStage(daysAgo);
+      const ts = settlementTimestamps(stage, showDate);
+
+      // Recoups for ~30% of settlements
+      const marketingExpense = showExpenses
+        .filter((e) => e.category === "marketing" && !e.absorbedByVenue)
+        .reduce((s, e) => s + e.amount, 0);
+      const hospitalityTotal = showExpenses
+        .filter((e) => e.category === "hospitality")
+        .reduce((s, e) => s + e.amount, 0);
+      const recoups = generateRecoups(
+        showId,
+        marketingExpense,
+        deal.hospitalityCap,
+        hospitalityTotal,
+      );
+
       settlementsToInsert.push({
         id: `stl_${showId}`,
         showId,
-        completedAt: new Date(date),
+        status: stage,
+        draftedAt: ts.draftedAt,
+        submittedAt: ts.submittedAt,
+        reviewStartedAt: ts.reviewStartedAt,
+        signedAt: ts.signedAt,
+        disputedAt: ts.disputedAt,
+        revisedAt: ts.revisedAt,
+        finalizedAt: ts.finalizedAt,
+        paidAt: ts.paidAt,
+        completedAt: ts.paidAt ?? ts.finalizedAt ?? ts.signedAt ?? new Date(date),
         completedByUserId: MARIANA_ID,
         grossBoxOffice: gross,
         netBoxOffice: gross - fees,
         totalExpenses: passThru,
         totalToArtist: Math.round(totalToArtist * 100) / 100,
-        status: rnd() < 0.05 ? "disputed" : "signed",
-        signoffText: choose(["OK. Good night.", "Looks good.", "👍", "ok wire monday", "Sign off."]),
+        recoupsJson: recoups ? JSON.stringify(recoups) : null,
+        signoffText:
+          stage === "draft" || stage === "submitted" || stage === "in_review"
+            ? null
+            : choose(["OK. Good night.", "Looks good.", "👍", "ok wire monday", "Sign off."]),
         notes: rnd() < 0.1
           ? choose(["Hospitality $87 absorbed — over rider.", "Backline charge waived.", "Marketing recoup pre-deducted from gross.", "Comp tickets: 12. Revenue impact accepted."])
           : null,
@@ -548,9 +962,10 @@ async function main() {
     }
   }
 
-  // Inject the Coastal Spell March 14 2025 dispute referenced in dispute-thread.md
+  // -------- Inject the Coastal Spell March 14, 2025 dispute --------
   const coastalDate = "2025-03-14";
   const coastalShowId = "show_coastal_spell_dispute";
+  const coastalShowDate = new Date(coastalDate);
   showsToInsert.push({
     id: coastalShowId,
     venueId: VENUE_ID,
@@ -560,8 +975,9 @@ async function main() {
     doorsTime: "19:30",
     setTime: "21:00",
     roomConfig: "standing",
-    internalNotes: "[Mariana, March 19] Settlement disputed by Daniel Hwang at WME re: marketing recoup interpretation. Marcus signed off on additional $720 to make it go away. See dispute-thread for full email chain. Going forward — get marketing recoup language explicit in the deal email.",
-    createdAt: new Date(coastalDate),
+    internalNotes:
+      "[Mariana, March 19] Settlement disputed by Daniel Hwang at WME re: marketing recoup interpretation. Marcus signed off on additional $720 to make it go away. See dispute-thread for full email chain. Going forward — get marketing recoup language explicit in the deal email.",
+    createdAt: coastalShowDate,
   });
   dealsToInsert.push({
     id: `deal_${coastalShowId}`,
@@ -572,17 +988,41 @@ async function main() {
     percentageBasis: "net",
     expenseCap: 2500,
     hospitalityCap: 500,
-    bonusesJson: null,
-    dealNotesFreetext: "$5,000 vs 80% of net after expenses, expenses capped $2,500. Marketing recoup of $900 against gross. (Note added 3/19/25: this deal email was ambiguous — recoup interpretation disputed by WME, resolved with $720 concession.)",
-    createdAt: new Date(coastalDate),
+    bonusesJson: JSON.stringify([
+      {
+        type: "gross_threshold",
+        label: "+$1,000 if gross > $25,000",
+        threshold: 25000,
+        amount: 1000,
+        stacks: false,
+      },
+    ] as Bonus[]),
+    dealNotesFreetext:
+      "$5,000 vs 80% of net after expenses, whichever greater. Expenses capped $2,500. Hospitality cap $500. +$1,000 bonus over $25k gross. Marketing recoup of $900 against gross. (Note added 3/19/25: this deal email was ambiguous — recoup interpretation disputed by WME, resolved with $720 concession.)",
+    createdAt: coastalShowDate,
   });
-  ticketSalesToInsert.push({ id: `ts_${coastalShowId}`, showId: coastalShowId, qty: 620, gross: 19840, fees: 1984, capturedAt: new Date(coastalDate) });
+  ticketSalesToInsert.push({
+    id: `ts_${coastalShowId}`,
+    showId: coastalShowId,
+    qty: 620,
+    gross: 19840,
+    fees: 1984,
+    capturedAt: coastalShowDate,
+  });
+  // Comps for Coastal Spell — they were a draw, lots of GL
+  compsToInsert.push(
+    { id: `comp_${coastalShowId}_0`, showId: coastalShowId, category: "artist_gl", count: 24, faceValue: 32, countsTowardGross: false, notes: null },
+    { id: `comp_${coastalShowId}_1`, showId: coastalShowId, category: "label", count: 6, faceValue: 32, countsTowardGross: false, notes: "Captured Tracks, A&R" },
+    { id: `comp_${coastalShowId}_2`, showId: coastalShowId, category: "press", count: 4, faceValue: 32, countsTowardGross: false, notes: null },
+    { id: `comp_${coastalShowId}_3`, showId: coastalShowId, category: "venue_staff", count: 6, faceValue: 32, countsTowardGross: false, notes: null },
+  );
+  // Expenses — note marketing is now a regular expense; the disputed marketing
+  // recoup is a separate line-item in recoups (where it conceptually belongs).
   for (const [idx, e] of [
     { category: "sound" as const, amount: 400, description: null },
     { category: "lights" as const, amount: 220, description: null },
     { category: "production" as const, amount: 280, description: null },
     { category: "hospitality" as const, amount: 480, description: null },
-    { category: "marketing" as const, amount: 900, description: "Marketing recoup — disputed interpretation" },
     { category: "backline" as const, amount: 220, description: null },
   ].entries()) {
     expensesToInsert.push({
@@ -594,24 +1034,44 @@ async function main() {
       approved: true,
       absorbedByVenue: false,
       enteredByUserId: MARIANA_ID,
-      enteredAt: new Date(coastalDate),
+      enteredAt: coastalShowDate,
     });
   }
+
+  const coastalRecoups: Recoup[] = [
+    {
+      id: `recoup_${coastalShowId}_0`,
+      category: "marketing",
+      label: "Spotify pre-show ad spend",
+      amount: 900,
+      status: "disputed",
+    },
+  ];
+
+  // Coastal Spell stage = disputed (in-flight, not yet resolved in product —
+  // narratively, Marcus authorized the concession but it's not been formalized
+  // back into the system as a revision).
   settlementsToInsert.push({
     id: `stl_${coastalShowId}`,
     showId: coastalShowId,
-    completedAt: new Date(coastalDate),
+    status: "disputed",
+    draftedAt: new Date("2025-03-15T02:00:00"),
+    submittedAt: new Date("2025-03-15T11:00:00"),
+    reviewStartedAt: new Date("2025-03-16T09:00:00"),
+    disputedAt: new Date("2025-03-18T14:00:00"),
+    completedAt: new Date("2025-03-18T14:00:00"),
     completedByUserId: MARIANA_ID,
     grossBoxOffice: 19840,
     netBoxOffice: 17856,
-    totalExpenses: 2500,
+    totalExpenses: 1600,
     totalToArtist: 12285,
-    status: "disputed",
+    recoupsJson: JSON.stringify(coastalRecoups),
     signoffText: "OK — but flag any future marketing recoup deals.",
-    notes: "Disputed by WME (Daniel Hwang) on 3/18. Marcus authorized additional $720 to resolve. Final settled at $12,285 (vs originally calculated $11,565). See email thread for context. Going forward: deal emails must specify marketing recoup as inside or outside expense cap.",
+    notes:
+      "Disputed by WME (Daniel Hwang) on 3/18 over the $900 marketing recoup. Marcus authorized additional $720 to resolve, but the formal revision hasn't been pushed back into the system yet. Final agreed: $12,285 (vs originally calculated $11,565). See email thread for context. Going forward: deal emails must specify marketing recoup as inside or outside expense cap.",
   });
 
-  // Bulk insert in chunks
+  // Bulk insert
   console.log(`   Inserting ${showsToInsert.length} shows…`);
   const chunkArr = <T>(arr: T[], size: number): T[][] =>
     Array.from({ length: Math.ceil(arr.length / size) }, (_, i) => arr.slice(i * size, i * size + size));
@@ -619,8 +1079,17 @@ async function main() {
   for (const c of chunkArr(showsToInsert, 50)) await db.insert(shows).values(c);
   for (const c of chunkArr(dealsToInsert, 50)) await db.insert(deals).values(c);
   for (const c of chunkArr(ticketSalesToInsert, 50)) await db.insert(ticketSales).values(c);
+  for (const c of chunkArr(compsToInsert, 50)) await db.insert(comps).values(c);
   for (const c of chunkArr(expensesToInsert, 50)) await db.insert(expenses).values(c);
   for (const c of chunkArr(settlementsToInsert, 50)) await db.insert(settlements).values(c);
+
+  // Stats
+  const stageCounts: Record<string, number> = {};
+  for (const s of settlementsToInsert) {
+    stageCounts[s.status as string] = (stageCounts[s.status as string] ?? 0) + 1;
+  }
+  const recoupCount = settlementsToInsert.filter((s) => s.recoupsJson).length;
+  const bonusCount = dealsToInsert.filter((d) => d.bonusesJson).length;
 
   console.log("✅ Seeded:");
   console.log(`   1 venue, 2 users`);
@@ -628,8 +1097,11 @@ async function main() {
   console.log(`   ${ARTIST_DEFS.length} artists`);
   console.log(`   ${showsToInsert.length} shows`);
   console.log(`   ${ticketSalesToInsert.length} ticket sale records`);
+  console.log(`   ${compsToInsert.length} comp records (${compsToInsert.reduce((s, c) => s + (c.count ?? 0), 0)} comp tickets total)`);
   console.log(`   ${expensesToInsert.length} expenses`);
-  console.log(`   ${settlementsToInsert.length} settlements`);
+  console.log(`   ${settlementsToInsert.length} settlements (${Object.entries(stageCounts).map(([k, v]) => `${k}:${v}`).join(", ")})`);
+  console.log(`   ${recoupCount} settlements have recoup line items`);
+  console.log(`   ${bonusCount} deals have structured bonuses`);
   console.log(`   1 named dispute (Coastal Spell, March 2025) injected for narrative continuity`);
 }
 

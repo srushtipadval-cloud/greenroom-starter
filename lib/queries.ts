@@ -10,9 +10,11 @@ import {
   agencies,
   deals,
   ticketSales,
+  comps,
   expenses,
   settlements,
   venues,
+  type Recoup,
 } from "@/db/schema";
 import { desc, asc, eq, sql } from "drizzle-orm";
 
@@ -56,7 +58,7 @@ export async function getShowById(id: string) {
   if (rows.length === 0) return null;
   const row = rows[0];
 
-  const [showTicketSales, showExpenses] = await Promise.all([
+  const [showTicketSales, showExpenses, showComps] = await Promise.all([
     db
       .select()
       .from(ticketSales)
@@ -67,12 +69,26 @@ export async function getShowById(id: string) {
       .from(expenses)
       .where(eq(expenses.showId, id))
       .orderBy(asc(expenses.enteredAt)),
+    db.select().from(comps).where(eq(comps.showId, id)),
   ]);
+
+  // Decode recoups JSON
+  let recoups: Recoup[] = [];
+  if (row.settlement?.recoupsJson) {
+    try {
+      const parsed = JSON.parse(row.settlement.recoupsJson);
+      if (Array.isArray(parsed)) recoups = parsed;
+    } catch {
+      // Malformed JSON — ignore
+    }
+  }
 
   return {
     ...row,
     ticketSales: showTicketSales,
     expenses: showExpenses,
+    comps: showComps,
+    recoups,
   };
 }
 
@@ -103,6 +119,7 @@ export async function getReports() {
   const allDealsRows = await db.select().from(deals);
   const allSettlementsRows = await db.select().from(settlements);
   const allShowsRows = await db.select().from(shows);
+  const allCompsRows = await db.select().from(comps);
 
   const dealTypeCounts: Record<string, number> = {};
   for (const d of allDealsRows) {
@@ -140,6 +157,39 @@ export async function getReports() {
   const settledCount = allShowsRows.filter((s) => s.status === "settled")
     .length;
 
+  // Bonuses
+  const dealsWithBonuses = allDealsRows.filter((d) => d.bonusesJson).length;
+
+  // Recoups
+  let totalRecoupValue = 0;
+  let disputedRecoupValue = 0;
+  let settlementsWithRecoups = 0;
+  for (const s of allSettlementsRows) {
+    if (!s.recoupsJson) continue;
+    try {
+      const recoups = JSON.parse(s.recoupsJson) as Recoup[];
+      if (!Array.isArray(recoups) || recoups.length === 0) continue;
+      settlementsWithRecoups++;
+      for (const r of recoups) {
+        totalRecoupValue += r.amount;
+        if (r.status === "disputed") disputedRecoupValue += r.amount;
+      }
+    } catch {
+      // skip
+    }
+  }
+
+  // Comps
+  const totalCompTickets = allCompsRows.reduce((s, c) => s + c.count, 0);
+  const totalCompFaceValue = allCompsRows.reduce(
+    (s, c) => s + c.count * c.faceValue,
+    0,
+  );
+  const compsByCategory: Record<string, number> = {};
+  for (const c of allCompsRows) {
+    compsByCategory[c.category] = (compsByCategory[c.category] ?? 0) + c.count;
+  }
+
   return {
     dealTypeCounts,
     totalDeals,
@@ -151,6 +201,13 @@ export async function getReports() {
     totalToArtists,
     showCount,
     settledCount,
+    dealsWithBonuses,
+    totalRecoupValue,
+    disputedRecoupValue,
+    settlementsWithRecoups,
+    totalCompTickets,
+    totalCompFaceValue,
+    compsByCategory,
   };
 }
 

@@ -1,7 +1,7 @@
 import Link from "next/link";
 import { ArrowUpRight } from "lucide-react";
 import { getAllShows } from "@/lib/queries";
-import { StatusBadge, DealTypeBadge } from "@/components/ui/badge";
+import { StatusBadge, DealTypeBadge, PlainBadge } from "@/components/ui/badge";
 import {
   formatShowDate,
   formatMoneyCompact,
@@ -180,7 +180,11 @@ function Section({
                     )}
                   </div>
                   <div className="flex items-center gap-2">
-                    <StatusBadge status={show.status} />
+                    {settlement ? (
+                      <SettlementLifecyclePill status={settlement.status} />
+                    ) : (
+                      <StatusBadge status={show.status} />
+                    )}
                     <ArrowUpRight className="h-3.5 w-3.5 text-ink-400 group-hover:text-ink-700 group-hover:-translate-y-0.5 group-hover:translate-x-0.5 transition-all" />
                   </div>
                 </Link>
@@ -191,4 +195,27 @@ function Section({
       </div>
     </section>
   );
+}
+
+const lifecycleStatusVariants: Record<
+  string,
+  { variant: "default" | "amber" | "brand" | "rose" | "sky"; label: string }
+> = {
+  draft: { variant: "default", label: "Draft" },
+  submitted: { variant: "sky", label: "Submitted" },
+  in_review: { variant: "sky", label: "In review" },
+  signed: { variant: "brand", label: "Signed" },
+  disputed: { variant: "rose", label: "Disputed" },
+  revised: { variant: "amber", label: "Revised" },
+  finalized: { variant: "brand", label: "Finalized" },
+  paid: { variant: "brand", label: "Paid" },
+  voided: { variant: "default", label: "Voided" },
+};
+
+function SettlementLifecyclePill({ status }: { status: string }) {
+  const v = lifecycleStatusVariants[status] ?? {
+    variant: "default" as const,
+    label: status,
+  };
+  return <PlainBadge variant={v.variant}>{v.label}</PlainBadge>;
 }
