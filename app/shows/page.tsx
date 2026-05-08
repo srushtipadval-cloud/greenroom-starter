@@ -19,8 +19,9 @@ export default async function ShowsPage() {
     .filter((r) => new Date(r.show.date) < today)
     .reverse();
 
-  const upcomingShown = upcoming.slice(0, 30);
-  const recentShown = past.slice(0, 10);
+  // Render everything — the collapsible sections handle the scroll problem.
+  const upcomingShown = upcoming;
+  const recentShown = past;
 
   const settledCount = past.filter((r) => r.settlement).length;
   const totalToArtists = past.reduce(
@@ -39,10 +40,10 @@ export default async function ShowsPage() {
       </h1>
       <p className="text-[14px] text-ink-500 mt-2.5 max-w-xl">
         Mariana&apos;s home view. {upcoming.length} upcoming, {past.length}{" "}
-        completed in the last 18 months.
+        completed in the last 24 months.
       </p>
 
-      {/* Stats row — cream-toned cards on cream canvas, more presence */}
+      {/* Stats row */}
       <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 mt-7">
         <Stat label="Upcoming" value={String(upcoming.length)} />
         <Stat label="Past 18 mo" value={String(past.length)} />
@@ -64,15 +65,17 @@ export default async function ShowsPage() {
           }
           rows={upcomingShown}
           emptyText="No upcoming shows on the books."
+          defaultOpen={true}
         />
       </div>
 
       <div className="mt-10">
         <Section
-          title="Recent"
-          subtitle={`Last ${recentShown.length}`}
+          title="Past"
+          subtitle="Click to expand · 24 months of history"
           rows={recentShown}
           emptyText="No completed shows yet."
+          defaultOpen={false}
         />
       </div>
     </div>
@@ -120,18 +123,28 @@ function Section({
   subtitle,
   rows,
   emptyText,
+  defaultOpen = true,
 }: {
   title: string;
   subtitle: string;
   rows: Awaited<ReturnType<typeof getAllShows>>;
   emptyText: string;
+  defaultOpen?: boolean;
 }) {
   return (
-    <section>
-      <div className="flex items-baseline justify-between mb-3">
-        <h2 className="text-[14px] font-semibold text-ink-900">{title}</h2>
+    <details open={defaultOpen} className="group/section">
+      <summary className="flex items-baseline justify-between mb-3 cursor-pointer list-none select-none">
+        <h2 className="text-[14px] font-semibold text-ink-900 flex items-center gap-1.5">
+          <span className="inline-block w-3 text-[10px] text-ink-500 transition-transform group-open/section:rotate-90">
+            ▶
+          </span>
+          {title}
+          <span className="text-ink-400 font-normal ml-1">
+            ({rows.length})
+          </span>
+        </h2>
         <span className="text-[12px] text-ink-500">{subtitle}</span>
-      </div>
+      </summary>
       <div className="rounded-xl border border-ink-200 bg-white overflow-hidden shadow-[0_1px_2px_rgba(20,15,8,0.04),0_4px_12px_rgba(20,15,8,0.04)]">
         {rows.length === 0 ? (
           <div className="px-5 py-12 text-[13px] text-ink-500 text-center">
@@ -193,7 +206,7 @@ function Section({
           </ul>
         )}
       </div>
-    </section>
+    </details>
   );
 }
 

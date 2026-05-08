@@ -21,6 +21,7 @@
  */
 
 import { db, client } from "./index";
+import { eq } from "drizzle-orm";
 import {
   users,
   venues,
@@ -306,9 +307,9 @@ function generateBonuses(tier: ArtistDef["tier"], baseGuarantee: number): Bonus[
 
 function generateDeal(tier: ArtistDef["tier"]): GeneratedDeal {
   const dealType = weighted<GeneratedDeal["type"]>([
-    { value: "flat", weight: tier === "D" ? 8 : tier === "C" ? 4 : 2 },
-    { value: "vs", weight: tier === "A" ? 7 : tier === "B" ? 6 : tier === "C" ? 4 : 1 },
-    { value: "percentage_of_net", weight: 2 },
+    { value: "flat", weight: tier === "D" ? 6 : tier === "C" ? 3 : 1.5 },
+    { value: "vs", weight: tier === "A" ? 11 : tier === "B" ? 9 : tier === "C" ? 5 : 1 },
+    { value: "percentage_of_net", weight: 3 },
     { value: "door", weight: tier === "D" ? 1 : 0.5 },
     { value: "percentage_of_gross", weight: 0.5 },
   ]);
@@ -350,13 +351,50 @@ function generateDeal(tier: ArtistDef["tier"]): GeneratedDeal {
       };
     }
     case "vs": {
+      // Variation 1: most common — guarantee vs % of net
+      // Variation 2: walkout pot — guarantee vs % of net, +100% of gross above breakeven
+      // Variation 3: ratchet — % escalates by sales tier
+      // Variation 4: vs % of GROSS (rarer, simpler math, riskier for venue)
+      const flavor = weighted([
+        { value: "standard" as const, weight: 6 },
+        { value: "walkout" as const, weight: 1.5 },
+        { value: "ratchet" as const, weight: 1.5 },
+        { value: "vs_gross" as const, weight: 1 },
+      ]);
+
       const pct = choose([0.7, 0.75, 0.8, 0.85, 0.85, 0.85, 0.9]);
       const expenseCap = Math.round((baseGuarantee * 0.5) / 50) * 50;
       const hospitalityCap = choose([300, 400, 500, 600]);
-      const bonuses = generateBonuses(tier, baseGuarantee);
-      // ~30% of the time, the structured bonuses are present but the prose
-      // describes them slightly differently or adds a condition the structured
-      // form can't capture. ~20% of the time, bonuses exist only in prose.
+      const basis = flavor === "vs_gross" ? "gross" : "net";
+
+      let bonuses = generateBonuses(tier, baseGuarantee);
+
+      // Walkout pot — adds an attendance threshold bonus on top
+      if (flavor === "walkout") {
+        const breakeven = Math.round((baseGuarantee * 1.2) / 100) * 100;
+        const walkout: Bonus = {
+          type: "gross_threshold",
+          label: `Walkout pot: 100% of gross above $${breakeven.toLocaleString()}`,
+          threshold: breakeven,
+          amount: Math.round(baseGuarantee * 0.5),
+          stacks: true,
+        };
+        bonuses = bonuses ? [...bonuses, walkout] : [walkout];
+      }
+
+      // Ratchet — adds a tier_ratchet bonus
+      if (flavor === "ratchet") {
+        const ratchet: Bonus = {
+          type: "tier_ratchet",
+          label: `Ratchet: ${(pct * 100).toFixed(0)}% to ${((pct + 0.1) * 100).toFixed(0)}% over 80% sold`,
+          tiers: [
+            { from: 0, to: 0.8, percentage: pct },
+            { from: 0.8, to: null, percentage: pct + 0.1 },
+          ],
+        };
+        bonuses = bonuses ? [...bonuses, ratchet] : [ratchet];
+      }
+
       const bonusesAlsoInProse = bonuses !== null && rnd() < 0.7;
       const bonusesProseOnly = bonuses === null && rnd() < 0.2;
 
@@ -364,8 +402,8 @@ function generateDeal(tier: ArtistDef["tier"]): GeneratedDeal {
         type: "vs",
         guaranteeAmount: baseGuarantee,
         percentage: pct,
-        percentageBasis: "net",
-        expenseCap,
+        percentageBasis: basis,
+        expenseCap: flavor === "vs_gross" ? null : expenseCap,
         hospitalityCap,
         bonuses,
         bonusesAlsoInProse,
@@ -376,6 +414,7 @@ function generateDeal(tier: ArtistDef["tier"]): GeneratedDeal {
           hospitalityCap,
           bonusesAlsoInProse ? bonuses : null,
           bonusesProseOnly,
+          flavor,
         ),
       };
     }
@@ -447,6 +486,7 @@ function generateVsDealNotes(
   hospitalityCap: number,
   bonuses: Bonus[] | null,
   bonusesProseOnly: boolean,
+  flavor: "standard" | "walkout" | "ratchet" | "vs_gross" = "standard",
 ): string {
   const bonusProseSnippet = bonuses
     ? ` ${bonuses.map((b) => b.label).join("; ")}.`
@@ -454,6 +494,35 @@ function generateVsDealNotes(
       ? ` Performance bonuses per the deal memo (see email thread).`
       : "";
 
+  if (flavor === "walkout") {
+    return choose([
+      () =>
+        `$${guarantee.toLocaleString()} vs ${(pct * 100).toFixed(0)}% net + walkout pot. After breakeven on guarantee + expenses, all incremental gross goes to artist. Hospitality cap $${hospitalityCap}.${bonusProseSnippet}`,
+      () =>
+        `${guarantee.toLocaleString()} g'tee vs ${(pct * 100).toFixed(0)}/${((1 - pct) * 100).toFixed(0)} net, walkout above breakeven. Expense cap ${expenseCap}, hosp $${hospitalityCap}.${bonusProseSnippet}`,
+    ])();
+  }
+
+  if (flavor === "ratchet") {
+    const upper = ((pct + 0.1) * 100).toFixed(0);
+    return choose([
+      () =>
+        `$${guarantee.toLocaleString()} vs ${(pct * 100).toFixed(0)}% net to 80% sold, ${upper}% above. Expense cap $${expenseCap}, hospitality $${hospitalityCap}.${bonusProseSnippet}`,
+      () =>
+        `${guarantee.toLocaleString()} g'tee with escalator: ${(pct * 100).toFixed(0)}% net at base, ratchets to ${upper}% over 80% capacity. Expenses to ${expenseCap}.${bonusProseSnippet}`,
+    ])();
+  }
+
+  if (flavor === "vs_gross") {
+    return choose([
+      () =>
+        `$${guarantee.toLocaleString()} vs ${(pct * 100).toFixed(0)}% of GROSS (no expense deductions), whichever greater. Hospitality cap $${hospitalityCap}.${bonusProseSnippet}`,
+      () =>
+        `${guarantee.toLocaleString()} g'tee vs ${(pct * 100).toFixed(0)}% gross — no expenses come out. Simpler math, riskier for venue. Hosp $${hospitalityCap}.${bonusProseSnippet}`,
+    ])();
+  }
+
+  // Standard
   const variants = [
     () =>
       `$${guarantee.toLocaleString()} guarantee vs ${(pct * 100).toFixed(0)}% of net after expenses, whichever greater. Expenses capped $${expenseCap}. Hospitality cap $${hospitalityCap}.${bonusProseSnippet}`,
@@ -824,12 +893,21 @@ async function main() {
   const expensesToInsert: (typeof expenses.$inferInsert)[] = [];
   const settlementsToInsert: (typeof settlements.$inferInsert)[] = [];
 
+  // Track post-insert mutations for breadcrumbs that need to update artist
+  // rows (already inserted earlier in main()).
+  const breadcrumbsToFinalize: { kind: "artist_priorshows"; artistId: string }[] = [];
+
   const datePool: string[] = [];
-  for (let off = -540; off <= 60; off++) {
+  // 24 months back, 60 days forward. More density on weekends, but Sun/Mon
+  // shows happen often enough that they should appear in the calendar.
+  for (let off = -730; off <= 60; off++) {
     const d = new Date(TODAY);
     d.setDate(d.getDate() + off);
     const dow = d.getDay();
-    if ((dow === 0 || dow === 1) && rnd() > 0.25) continue;
+    // Sun/Mon less common but not rare
+    if ((dow === 0 || dow === 1) && rnd() > 0.4) continue;
+    // Tuesday slightly less common
+    if (dow === 2 && rnd() > 0.7) continue;
     datePool.push(dateOffset(off));
   }
   // Shuffle so shows distribute across the full window — otherwise the
@@ -841,7 +919,9 @@ async function main() {
 
   const artistPool: ArtistDef[] = [];
   for (const a of ARTIST_DEFS) {
-    const count = Math.max(2, Math.round(a.recurrence * 2 + (rnd() - 0.5) * 2));
+    // Bumped multiplier so we have more shows per artist over the 24-month
+    // window. Tier-A acts come back several times; D-tier are mostly one-offs.
+    const count = Math.max(2, Math.round(a.recurrence * 3 + (rnd() - 0.5) * 2));
     for (let i = 0; i < count; i++) artistPool.push(a);
   }
   for (let i = artistPool.length - 1; i > 0; i--) {
@@ -960,6 +1040,277 @@ async function main() {
           : null,
       });
     }
+  }
+
+  // -------- Plant breadcrumbs: deliberate UI/data contradictions --------
+  //
+  // These are intentional inconsistencies that a sharp candidate should find
+  // by reading the data carefully against what the UI displays. Each one
+  // illuminates a different facet of why structured-fields-vs-prose is hard.
+  // The hiring team's "answer key" lists what each breadcrumb tests for.
+  //
+  // We mutate already-generated rows rather than creating dedicated breadcrumb
+  // shows — this way the IDs look ordinary and candidates have to mine.
+
+  const pastSettlements = settlementsToInsert.filter(
+    (s) => s.status !== "draft" && s.status !== "voided",
+  );
+  // Helpers
+  const findShow = (id: string) => showsToInsert.find((s) => s.id === id);
+  const findDeal = (showId: string) =>
+    dealsToInsert.find((d) => d.showId === showId);
+  const findSettlement = (showId: string) =>
+    settlementsToInsert.find((s) => s.showId === showId);
+  const findComps = (showId: string) =>
+    compsToInsert.filter((c) => c.showId === showId);
+  const findExpenses = (showId: string) =>
+    expensesToInsert.filter((e) => e.showId === showId);
+
+  // Pick deterministic targets — we use offsets into the pastSettlements list
+  // so the same shows get planted on every reseed.
+  const tgt = (offset: number) => {
+    const i = (offset * 13 + 7) % pastSettlements.length;
+    return pastSettlements[i].showId as string;
+  };
+
+  // BC1: Disputed status but positive signoff text — UI red flag, data agreement
+  {
+    const showId = tgt(0);
+    const stl = findSettlement(showId);
+    if (stl) {
+      stl.status = "disputed";
+      stl.disputedAt = stl.signedAt ?? stl.submittedAt;
+      stl.signoffText =
+        "Looks good — TM. Wire to the usual account when ready.";
+      stl.notes =
+        "[Mariana, internal] TM signed off Sunday morning. His assistant emailed Monday questioning the production-overage line — that's why this is showing as disputed. Need to either re-send a clean version or close the dispute. Haven't gotten back to it.";
+    }
+  }
+
+  // BC2: Bonus threshold drift — prose says one number, bonuses_json says another
+  {
+    const targetDeal = dealsToInsert.find(
+      (d) =>
+        d.dealType === "vs" &&
+        d.bonusesJson &&
+        JSON.parse(d.bonusesJson)[0]?.type === "gross_threshold",
+    );
+    if (targetDeal) {
+      const bonuses = JSON.parse(targetDeal.bonusesJson as string) as Bonus[];
+      const orig = bonuses[0] as { threshold: number; amount: number };
+      // Prose mentions a threshold $5k LOWER than what's in the structured field.
+      // The deal was renegotiated by phone; only the prose got updated.
+      const proseThreshold = orig.threshold - 5000;
+      targetDeal.dealNotesFreetext =
+        `${targetDeal.dealNotesFreetext} ` +
+        `[Updated 4 days before show via phone call with agent: bonus threshold dropped to $${proseThreshold.toLocaleString()}. ` +
+        `Note: structured field still reflects original $${orig.threshold.toLocaleString()} — confirm before settlement.]`;
+    }
+  }
+
+  // BC3: Paid settlement with a still-disputed recoup
+  {
+    const target = pastSettlements.find(
+      (s) => s.status === "paid" && !s.recoupsJson,
+    );
+    if (target) {
+      target.recoupsJson = JSON.stringify([
+        {
+          id: `recoup_${target.showId}_late`,
+          category: "marketing",
+          label: "Late-add: pre-show Instagram boost ($340)",
+          amount: 340,
+          status: "disputed",
+        },
+      ] as Recoup[]);
+      target.notes =
+        "Paid out per the agreed line items. TM emailed two weeks later flagging the IG boost recoup — never resolved, never re-issued. Carrying as outstanding.";
+    }
+  }
+
+  // BC4: Recoup miscoded — labeled marketing, filed under production category
+  {
+    const target = pastSettlements.find(
+      (s) => s.recoupsJson && JSON.parse(s.recoupsJson).length === 1,
+    );
+    if (target) {
+      const recoups = JSON.parse(target.recoupsJson as string) as Recoup[];
+      recoups.push({
+        id: `recoup_${target.showId}_misfiled`,
+        category: "production_overage", // wrong! it's marketing — but filed here
+        label: "Spotify pre-show ad spend recoup",
+        amount: 285,
+        status: "agreed",
+      });
+      target.recoupsJson = JSON.stringify(recoups);
+    }
+  }
+
+  // BC5: Hospitality silent overrun — cap was set, actuals blew through it,
+  //      no expenses flagged as absorbed
+  {
+    const targetDeal = dealsToInsert.find(
+      (d) => d.dealType === "vs" && d.hospitalityCap === 400,
+    );
+    if (targetDeal) {
+      const expenses = findExpenses(targetDeal.showId);
+      const hosp = expenses.find((e) => e.category === "hospitality");
+      if (hosp) {
+        hosp.amount = 620; // way over the $400 cap
+        hosp.absorbedByVenue = false; // and nothing was absorbed
+        hosp.description = "Whiskey, food run, post-show snacks";
+      }
+    }
+  }
+
+  // BC6: Percentage drift — prose says 85%, structured says 75%
+  {
+    const targetDeal = dealsToInsert.find(
+      (d) =>
+        (d.dealType === "vs" || d.dealType === "percentage_of_net") &&
+        d.percentage === 0.75,
+    );
+    if (targetDeal) {
+      // Prose was updated to reflect renegotiation; structured field never updated
+      targetDeal.dealNotesFreetext =
+        `Renegotiated 1 week before show: $${targetDeal.guaranteeAmount?.toLocaleString() ?? "—"} g'tee vs 85/15 split on net (was 75/25). ` +
+        `Expense cap $${targetDeal.expenseCap}, hospitality $${targetDeal.hospitalityCap}.`;
+    }
+  }
+
+  // BC7: Reversed timestamps — signedAt before submittedAt
+  {
+    const target = pastSettlements.find(
+      (s) =>
+        s.status === "paid" &&
+        s.submittedAt &&
+        s.signedAt &&
+        s.submittedAt instanceof Date &&
+        s.signedAt instanceof Date,
+    );
+    if (target) {
+      // Swap them so signedAt < submittedAt
+      const tmp = target.submittedAt;
+      target.submittedAt = target.signedAt;
+      target.signedAt = tmp;
+    }
+  }
+
+  // BC8: Duplicate expense — same vendor, same amount, ~3 hours apart
+  {
+    const target = pastSettlements[
+      Math.floor(pastSettlements.length * 0.4)
+    ];
+    if (target) {
+      const expenses = findExpenses(target.showId);
+      const sound = expenses.find((e) => e.category === "sound");
+      if (sound) {
+        const original = sound.enteredAt as Date;
+        const dupTime = new Date(original);
+        dupTime.setHours(dupTime.getHours() + 3);
+        expensesToInsert.push({
+          id: `exp_${target.showId}_dup`,
+          showId: target.showId,
+          category: "sound",
+          amount: sound.amount,
+          description: sound.description,
+          approved: true,
+          absorbedByVenue: false,
+          enteredByUserId: MARCUS_ID, // entered by GM the second time
+          enteredAt: dupTime,
+        });
+      }
+    }
+  }
+
+  // BC9: Wrong dealType — prose describes a Vs deal, structured field says
+  //      percentage_of_net (renegotiated up from %-only, never updated the type)
+  {
+    const targetDeal = dealsToInsert.find(
+      (d) => d.dealType === "percentage_of_net" && d.percentage === 0.85,
+    );
+    if (targetDeal) {
+      targetDeal.guaranteeAmount = 3500;
+      targetDeal.dealNotesFreetext =
+        `$3,500 guarantee vs 85% of net after expenses, whichever greater. ` +
+        `Renegotiated up from %-only deal three weeks before show — agent insisted on a floor. ` +
+        `Expense cap $${targetDeal.expenseCap}, hospitality $${targetDeal.hospitalityCap}.`;
+    }
+  }
+
+  // BC10: CountsTowardGross contradiction — flag false but note says "agreed counts"
+  {
+    const target = compsToInsert.find(
+      (c) => c.category === "label" && !c.countsTowardGross,
+    );
+    if (target) {
+      target.notes =
+        "Per Sarah Kim email 4/12 — agreed these count toward gross at face value. Flag still says no, doesn't matter for this show but flag for next time.";
+    }
+  }
+
+  // BC11: Stale priorShowCount — artist has many prior shows, field says 0
+  // Pick an artist who appears frequently
+  {
+    const artistCounts: Record<string, number> = {};
+    for (const s of showsToInsert) {
+      artistCounts[s.artistId] = (artistCounts[s.artistId] ?? 0) + 1;
+    }
+    const frequent = Object.entries(artistCounts)
+      .filter(([, c]) => c >= 4)
+      .sort(([, a], [, b]) => b - a);
+    if (frequent.length > 1) {
+      // Pick the SECOND-most-frequent so the most-frequent stays accurate
+      const [artistId] = frequent[1];
+      // We need to mutate the artist insertion list — find it
+      // (already inserted into DB above, so we'll do this via raw update)
+      // Better approach: track this for post-insert update
+      breadcrumbsToFinalize.push({ kind: "artist_priorshows", artistId });
+    }
+  }
+
+  // BC12: WME / Daniel Hwang pattern — multiple disputed marketing recoups across shows
+  // Find Daniel Hwang's agent ID
+  const danielHwang = AGENT_DEFS.find((a) => a.name === "Daniel Hwang");
+  if (danielHwang) {
+    // Find shows where the artist's agent is Daniel Hwang
+    const hwangArtistIds = ARTIST_DEFS.filter(
+      (a) => artistAgentMap.get(a.id) === danielHwang.id,
+    ).map((a) => a.id);
+
+    const hwangShows = showsToInsert
+      .filter((s) => hwangArtistIds.includes(s.artistId))
+      .map((s) => s.id as string);
+
+    // Pick up to 5 of those shows that already have settlements, and ensure
+    // each has a disputed marketing recoup. This creates a pattern: anyone
+    // querying "disputes by agent" sees Daniel Hwang light up.
+    let planted = 0;
+    for (const showId of hwangShows) {
+      if (planted >= 5) break;
+      const stl = findSettlement(showId);
+      if (!stl || stl.status === "draft" || stl.status === "voided") continue;
+
+      const existing: Recoup[] = stl.recoupsJson
+        ? JSON.parse(stl.recoupsJson as string)
+        : [];
+      // Skip if already has a disputed marketing recoup (don't double-plant)
+      if (existing.some((r) => r.category === "marketing" && r.status === "disputed")) {
+        continue;
+      }
+
+      const amount = 250 + Math.floor(rnd() * 600);
+      existing.push({
+        id: `recoup_${showId}_hwang_pattern`,
+        category: "marketing",
+        label: "Marketing recoup (post-show pushback)",
+        amount,
+        status: "disputed",
+      });
+      stl.recoupsJson = JSON.stringify(existing);
+      planted++;
+    }
+    console.log(`   BC12: Planted ${planted} Daniel Hwang marketing-recoup disputes`);
   }
 
   // -------- Inject the Coastal Spell March 14, 2025 dispute --------
@@ -1082,6 +1433,16 @@ async function main() {
   for (const c of chunkArr(compsToInsert, 50)) await db.insert(comps).values(c);
   for (const c of chunkArr(expensesToInsert, 50)) await db.insert(expenses).values(c);
   for (const c of chunkArr(settlementsToInsert, 50)) await db.insert(settlements).values(c);
+
+  // BC11 finalization: artist's priorShowCount left stale despite many shows
+  for (const bc of breadcrumbsToFinalize) {
+    if (bc.kind === "artist_priorshows") {
+      await db
+        .update(artists)
+        .set({ priorShowCount: 0 })
+        .where(eq(artists.id, bc.artistId));
+    }
+  }
 
   // Stats
   const stageCounts: Record<string, number> = {};

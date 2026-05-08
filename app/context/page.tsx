@@ -148,6 +148,22 @@ export default function ContextPage() {
         you cut, what you cut deliberately, and what you&apos;d ship next.
       </p>
 
+      {/* Data skepticism hint */}
+      <div className="mt-7 rounded-xl border border-ink-200 bg-canvas-soft p-5">
+        <div className="text-[11px] font-semibold uppercase tracking-wider text-ink-700 mb-2">
+          One note before you dive in
+        </div>
+        <p className="text-[13px] text-ink-700 leading-relaxed">
+          Real venue data is messy. Fields drift, prose contradicts structured
+          values, statuses don&apos;t always match the underlying reality, and
+          patterns hide across many shows that look unremarkable in isolation.
+          What the UI shows you isn&apos;t always what the data says — and
+          neither is necessarily what actually happened. We&apos;d encourage
+          you to read the data closely, query it directly, and bring
+          skepticism to anything that seems too clean.
+        </p>
+      </div>
+
       <div className="mt-9 pt-6 border-t border-ink-200 flex items-center justify-between">
         <Link
           href="/shows"
