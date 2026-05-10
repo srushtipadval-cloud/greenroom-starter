@@ -5,70 +5,59 @@ import {
   formatShowMonth,
   relativeShowDate,
 } from "@/lib/format";
-import { ShowsToggle } from "./shows-toggle";
-import type { ShowRow } from "./shows-toggle";
+import { ShowsList } from "./shows-list";
+import type { ShowRow } from "./shows-list";
 
 export default async function ShowsPage() {
   const rows = await getAllShows();
 
-  const today = new Date();
-  today.setHours(0, 0, 0, 0);
+  const reversed = [...rows].reverse();
 
-  const tomorrow = new Date(today);
-  tomorrow.setDate(tomorrow.getDate() + 1);
-
-  const upcoming = rows.filter((r) => new Date(r.show.date) >= tomorrow);
-  const past = rows
-    .filter((r) => new Date(r.show.date) < tomorrow)
-    .reverse();
-
-  const settledCount = past.filter((r) => r.settlement).length;
-  const totalToArtists = past.reduce(
+  const settledCount = reversed.filter((r) => r.settlement).length;
+  const disputedCount = reversed.filter(
+    (r) => r.settlement?.status === "disputed",
+  ).length;
+  const totalToArtists = reversed.reduce(
     (sum, r) => sum + (r.settlement?.totalToArtist ?? 0),
     0,
   );
-  const disputedCount = past.filter(
-    (r) => r.settlement?.status === "disputed",
-  ).length;
 
-  const serializeRows = (list: typeof rows): ShowRow[] =>
-    list.map(({ show, artist, deal, settlement }) => ({
-      show: {
-        id: show.id,
-        status: show.status as
-          | "booked"
-          | "advanced"
-          | "day_of"
-          | "settled"
-          | "closed",
-      },
-      artist: artist ? { name: artist.name } : null,
-      deal: deal
-        ? {
-            dealType: deal.dealType,
-            guaranteeFormatted:
-              deal.guaranteeAmount != null
-                ? formatMoneyCompact(deal.guaranteeAmount)
-                : null,
-          }
-        : null,
-      settlement: settlement
-        ? {
-            totalFormatted:
-              settlement.totalToArtist != null
-                ? formatMoneyCompact(settlement.totalToArtist)
-                : null,
-            status: settlement.status,
-          }
-        : null,
-      dateFormatted: formatShowDate(show.date),
-      dateRelative: relativeShowDate(show.date),
-      month: formatShowMonth(show.date),
-    }));
+  const serialized: ShowRow[] = reversed.map(({ show, artist, deal, settlement }) => ({
+    show: {
+      id: show.id,
+      status: show.status as
+        | "booked"
+        | "advanced"
+        | "day_of"
+        | "settled"
+        | "closed",
+    },
+    artist: artist ? { name: artist.name } : null,
+    deal: deal
+      ? {
+          dealType: deal.dealType,
+          guaranteeFormatted:
+            deal.guaranteeAmount != null
+              ? formatMoneyCompact(deal.guaranteeAmount)
+              : null,
+        }
+      : null,
+    settlement: settlement
+      ? {
+          totalFormatted:
+            settlement.totalToArtist != null
+              ? formatMoneyCompact(settlement.totalToArtist)
+              : null,
+          status: settlement.status,
+        }
+      : null,
+    dateFormatted: formatShowDate(show.date),
+    dateRelative: relativeShowDate(show.date),
+    month: formatShowMonth(show.date),
+  }));
 
   return (
     <div className="px-12 py-10 max-w-7xl">
-      {/* Hero */}
       <div className="mb-14">
         <div className="eyebrow mb-3">
           The Crescent · Nashville · 650 cap
@@ -80,7 +69,8 @@ export default async function ShowsPage() {
           Shows
         </h1>
         <p className="text-[14px] text-ink-500 mt-3 max-w-lg leading-relaxed">
-          Mariana&apos;s home view. {past.length} completed, {upcoming.length} upcoming
+          Mariana&apos;s home view. {reversed.length} shows over 24 months.{" "}
+          {settledCount} settled
           {disputedCount > 0 && (
             <>, <span className="text-rose-700">{disputedCount} disputed</span></>
           )}
@@ -88,10 +78,8 @@ export default async function ShowsPage() {
         </p>
       </div>
 
-      {/* Stats */}
-      <div className="grid grid-cols-4 gap-px bg-ink-200/40 rounded-xl overflow-hidden mb-14">
-        <StatCard label="Upcoming" value={String(upcoming.length)} />
-        <StatCard label="Completed" value={String(past.length)} />
+      <div className="grid grid-cols-3 gap-px bg-ink-200/40 rounded-xl overflow-hidden mb-14">
+        <StatCard label="Shows" value={String(reversed.length)} />
         <StatCard label="Settled" value={String(settledCount)} accent />
         <StatCard
           label="Paid to artists"
@@ -100,11 +88,7 @@ export default async function ShowsPage() {
         />
       </div>
 
-      {/* Show list */}
-      <ShowsToggle
-        upcoming={serializeRows(upcoming)}
-        past={serializeRows(past)}
-      />
+      <ShowsList rows={serialized} />
     </div>
   );
 }

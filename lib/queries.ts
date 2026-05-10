@@ -1,11 +1,5 @@
 /**
  * Server-side query helpers.
- *
- * Time-gate: shows whose date is in the future are returned with settlement,
- * ticket, expense, and recoup data suppressed. The data exists in the DB
- * (seeded for every show) but only surfaces once the show date has passed.
- * This means a candidate opening the case on any date sees complete data
- * for all past shows, regardless of when the seed was originally run.
  */
 
 import { db } from "@/db";
@@ -22,7 +16,7 @@ import {
   venues,
   type Recoup,
 } from "@/db/schema";
-import { desc, asc, eq, sql, lt } from "drizzle-orm";
+import { desc, asc, eq, sql, lte } from "drizzle-orm";
 
 function todayDateString(): string {
   const d = new Date();
@@ -30,12 +24,8 @@ function todayDateString(): string {
   return d.toISOString().slice(0, 10);
 }
 
-function isShowPast(showDate: string): boolean {
-  return showDate <= todayDateString();
-}
-
 export async function getAllShows() {
-  const rows = await db
+  return db
     .select({
       show: shows,
       artist: artists,
@@ -48,14 +38,8 @@ export async function getAllShows() {
     .leftJoin(agents, eq(artists.agentId, agents.id))
     .leftJoin(deals, eq(deals.showId, shows.id))
     .leftJoin(settlements, eq(settlements.showId, shows.id))
+    .where(lte(shows.date, todayDateString()))
     .orderBy(asc(shows.date));
-
-  return rows.map((row) => {
-    if (isShowPast(row.show.date)) {
-      return { ...row, show: { ...row.show, status: "settled" as const } };
-    }
-    return { ...row, settlement: null };
-  });
 }
 
 export async function getShowById(id: string) {
@@ -81,8 +65,6 @@ export async function getShowById(id: string) {
   if (rows.length === 0) return null;
   const row = rows[0];
 
-  const past = isShowPast(row.show.date);
-
   const [showTicketSales, showExpenses, showComps] = await Promise.all([
     db
       .select()
@@ -98,7 +80,7 @@ export async function getShowById(id: string) {
   ]);
 
   let recoups: Recoup[] = [];
-  if (past && row.settlement?.recoupsJson) {
+  if (row.settlement?.recoupsJson) {
     try {
       const parsed = JSON.parse(row.settlement.recoupsJson);
       if (Array.isArray(parsed)) recoups = parsed;
@@ -107,20 +89,8 @@ export async function getShowById(id: string) {
     }
   }
 
-  if (!past) {
-    return {
-      ...row,
-      settlement: null,
-      ticketSales: [],
-      expenses: [],
-      comps: showComps,
-      recoups: [],
-    };
-  }
-
   return {
     ...row,
-    show: { ...row.show, status: "settled" as const },
     ticketSales: showTicketSales,
     expenses: showExpenses,
     comps: showComps,
@@ -150,13 +120,13 @@ export async function getAllArtists() {
     .orderBy(desc(sql`count(${shows.id})`), asc(artists.name));
 }
 
-/** Aggregates for the reports page — only counts past shows. */
+/** Aggregates for the reports page. */
 export async function getReports() {
   const today = todayDateString();
 
   const allShowsRows = await db.select().from(shows);
   const pastShowIds = new Set(
-    allShowsRows.filter((s) => s.date < today).map((s) => s.id),
+    allShowsRows.filter((s) => s.date <= today).map((s) => s.id),
   );
 
   const allDealsRows = await db.select().from(deals);
@@ -203,9 +173,7 @@ export async function getReports() {
   );
 
   const showCount = pastShowIds.size;
-  const settledCount = allShowsRows.filter(
-    (s) => pastShowIds.has(s.id),
-  ).length;
+  const settledCount = pastShowIds.size;
 
   // Bonuses
   const dealsWithBonuses = pastDeals.filter((d) => d.bonusesJson).length;

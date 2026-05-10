@@ -41,9 +41,6 @@ function getAccentColor(row: ShowRow): string {
     if (s === "submitted" || s === "in_review") return "bg-sky-400";
     return "bg-ink-300";
   }
-  if (row.show.status === "day_of") return "bg-amber-500";
-  if (row.show.status === "advanced") return "bg-sky-400";
-  if (row.show.status === "settled") return "bg-brand-400";
   return "bg-ink-200";
 }
 
@@ -56,83 +53,26 @@ function groupByMonth(rows: ShowRow[]): { month: string; rows: ShowRow[] }[] {
   return Array.from(groups.entries()).map(([month, rows]) => ({ month, rows }));
 }
 
-export function ShowsToggle({
-  upcoming,
-  past,
-}: {
-  upcoming: ShowRow[];
-  past: ShowRow[];
-}) {
-  const [active, setActive] = useState<"upcoming" | "past">("past");
+export function ShowsList({ rows }: { rows: ShowRow[] }) {
   const [query, setQuery] = useState("");
 
-  const sourceRows = active === "upcoming" ? upcoming : past;
-
   const filtered = useMemo(() => {
-    if (!query.trim()) return sourceRows;
+    if (!query.trim()) return rows;
     const q = query.toLowerCase();
-    return sourceRows.filter(
+    return rows.filter(
       (r) =>
         r.artist?.name.toLowerCase().includes(q) ||
         r.deal?.dealType.toLowerCase().includes(q) ||
         r.dateFormatted.toLowerCase().includes(q),
     );
-  }, [sourceRows, query]);
+  }, [rows, query]);
 
   const months = useMemo(() => groupByMonth(filtered), [filtered]);
 
   return (
     <div>
-      {/* Controls bar */}
-      <div className="flex items-center justify-between gap-4 mb-6">
-        {/* Segmented control */}
-        <div
-          className="relative inline-grid grid-cols-2 bg-ink-100/80 rounded-lg p-[3px]"
-          style={{ minWidth: 240 }}
-        >
-          <div
-            className="absolute top-[3px] bottom-[3px] w-[calc(50%-3px)] bg-white rounded-[6px] shadow-[0_1px_3px_rgba(26,24,20,0.08)] transition-all duration-200 ease-out"
-            style={{
-              left: active === "past" ? 3 : "calc(50% + 0px)",
-            }}
-          />
-          <button
-            onClick={() => { setActive("past"); setQuery(""); }}
-            className={`relative z-10 px-4 py-2 rounded-md text-[13px] font-medium transition-colors duration-150 ${
-              active === "past"
-                ? "text-ink-900"
-                : "text-ink-500 hover:text-ink-700"
-            }`}
-          >
-            Past
-            <span
-              className={`ml-1.5 font-mono tabular text-[11px] ${
-                active === "past" ? "text-ink-500" : "text-ink-400"
-              }`}
-            >
-              {past.length}
-            </span>
-          </button>
-          <button
-            onClick={() => { setActive("upcoming"); setQuery(""); }}
-            className={`relative z-10 px-4 py-2 rounded-md text-[13px] font-medium transition-colors duration-150 ${
-              active === "upcoming"
-                ? "text-ink-900"
-                : "text-ink-500 hover:text-ink-700"
-            }`}
-          >
-            Upcoming
-            <span
-              className={`ml-1.5 font-mono tabular text-[11px] ${
-                active === "upcoming" ? "text-ink-500" : "text-ink-400"
-              }`}
-            >
-              {upcoming.length}
-            </span>
-          </button>
-        </div>
-
-        {/* Search */}
+      {/* Search */}
+      <div className="mb-6">
         <div className="relative">
           <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-3.5 w-3.5 text-ink-400 pointer-events-none" />
           <input
@@ -140,7 +80,7 @@ export function ShowsToggle({
             placeholder="Search artists, deals…"
             value={query}
             onChange={(e) => setQuery(e.target.value)}
-            className="w-60 pl-9 pr-3 py-2 text-[13px] bg-white border border-ink-200/60 rounded-lg text-ink-900 placeholder:text-ink-400 focus:outline-none focus:ring-2 focus:ring-brand-700/20 focus:border-brand-300 transition-all"
+            className="w-64 pl-9 pr-3 py-2 text-[13px] bg-white border border-ink-200/60 rounded-lg text-ink-900 placeholder:text-ink-400 focus:outline-none focus:ring-2 focus:ring-brand-700/20 focus:border-brand-300 transition-all"
           />
         </div>
       </div>
@@ -152,9 +92,7 @@ export function ShowsToggle({
           <div className="text-[14px] text-ink-500">
             {query
               ? `No shows matching "${query}"`
-              : active === "upcoming"
-                ? "No upcoming shows on the books."
-                : "No completed shows yet."}
+              : "No shows yet."}
           </div>
           {query && (
             <button
@@ -169,7 +107,6 @@ export function ShowsToggle({
         <div className="space-y-8">
           {months.map(({ month, rows }) => (
             <section key={month}>
-              {/* Month header */}
               <div className="flex items-baseline justify-between mb-1 px-1">
                 <h3 className="text-[13px] font-semibold text-ink-900">
                   {month}
@@ -193,7 +130,7 @@ export function ShowsToggle({
       {query && filtered.length > 0 && (
         <div className="mt-4 text-center">
           <span className="text-[12px] text-ink-400">
-            {filtered.length} of {sourceRows.length} shows
+            {filtered.length} of {rows.length} shows
           </span>
         </div>
       )}
@@ -214,7 +151,6 @@ function ShowListRow({ row }: { row: ShowRow }) {
         href={`/shows/${show.id}`}
         className="grid grid-cols-[84px_1fr_120px_auto_24px] items-center gap-4 pl-5 pr-2 py-3 rounded-lg hover:bg-white/80 hover:shadow-[0_1px_4px_rgba(26,24,20,0.04)] transition-all duration-150"
       >
-        {/* Date */}
         <div>
           <div className="text-[12.5px] font-medium text-ink-800 tabular">
             {row.dateFormatted}
@@ -224,7 +160,6 @@ function ShowListRow({ row }: { row: ShowRow }) {
           </div>
         </div>
 
-        {/* Artist + deal */}
         <div className="min-w-0">
           <div className="text-[14.5px] font-medium text-ink-900 truncate group-hover:text-brand-800 transition-colors">
             {artist?.name ?? "—"}
@@ -240,7 +175,6 @@ function ShowListRow({ row }: { row: ShowRow }) {
           </div>
         </div>
 
-        {/* Settlement amount */}
         <div className="text-right">
           {settlement?.totalFormatted ? (
             <>
@@ -254,53 +188,22 @@ function ShowListRow({ row }: { row: ShowRow }) {
           ) : null}
         </div>
 
-        {/* Status */}
         <div className="flex justify-end">
           {settlement ? (
-            <SettlementLifecyclePill status={settlement.status} />
-          ) : (
-            <ShowStatusPill status={show.status} />
-          )}
+            <SettlementPill status={settlement.status} />
+          ) : null}
         </div>
 
-        {/* Arrow */}
         <ArrowUpRight className="h-3.5 w-3.5 text-ink-200 group-hover:text-ink-500 group-hover:-translate-y-0.5 group-hover:translate-x-0.5 transition-all duration-150" />
       </Link>
     </li>
   );
 }
 
-function SettlementLifecyclePill({ status }: { status: string }) {
+function SettlementPill({ status }: { status: string }) {
   const v = lifecycleStatusVariants[status] ?? {
     variant: "default" as const,
     label: status,
   };
   return <PlainBadge variant={v.variant}>{v.label}</PlainBadge>;
-}
-
-const showStatusLabels: Record<Status, string> = {
-  booked: "Booked",
-  advanced: "Advanced",
-  day_of: "Day of",
-  settled: "Settled",
-  closed: "Closed",
-};
-
-const showStatusVariants: Record<
-  Status,
-  "default" | "amber" | "brand" | "rose" | "sky"
-> = {
-  booked: "default",
-  advanced: "sky",
-  day_of: "amber",
-  settled: "brand",
-  closed: "default",
-};
-
-function ShowStatusPill({ status }: { status: Status }) {
-  return (
-    <PlainBadge variant={showStatusVariants[status]}>
-      {showStatusLabels[status]}
-    </PlainBadge>
-  );
 }
