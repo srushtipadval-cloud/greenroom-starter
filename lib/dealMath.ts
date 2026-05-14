@@ -47,6 +47,22 @@ export function parseBonuses(deal: Deal): Bonus[] {
   } catch { return []; }
 }
 
+/**
+ * Filter legacy bonuses already accounted for by the parser to prevent double-count.
+ */
+function legacyBonusesAfterParse(deal: Deal, parsedTerms?: ParsedDealTerms): Bonus[] {
+  const all = parseBonuses(deal);
+  if (!parsedTerms) return all;
+  return all.filter((b) => {
+    if (b.type !== "gross_threshold") return true;
+    if (parsedTerms.walkoutPotThreshold != null &&
+        Math.abs(b.threshold - parsedTerms.walkoutPotThreshold) < 1) return false;
+    if (parsedTerms.bonusThreshold != null &&
+        Math.abs(b.threshold - parsedTerms.bonusThreshold) < 1) return false;
+    return true;
+  });
+}
+
 export function calculateSettlement(input: CalcInput): SettlementCalculation {
   const { deal, ticketSales, expenses, venueCapacity, ticketsSold, parsedTerms } = input;
 
@@ -77,7 +93,7 @@ export function calculateSettlement(input: CalcInput): SettlementCalculation {
   if (deal.dealType === "flat") {
     const guarantee = parsedTerms?.guarantee ?? deal.guaranteeAmount;
     if (guarantee == null) return { supported: false, reason: "Flat deal missing guarantee amount.", dealType: deal.dealType };
-    const bonusResult = applyBonuses(parseBonuses(deal), { gross: grossBoxOffice, tickets, capacity: venueCapacity });
+    const bonusResult = applyBonuses(legacyBonusesAfterParse(deal, parsedTerms), { gross: grossBoxOffice, tickets, capacity: venueCapacity });
     return {
       supported: true, grossBoxOffice, netBoxOffice, totalExpenses,
       totalToArtist: guarantee + bonusResult.totalApplied,
@@ -92,7 +108,7 @@ export function calculateSettlement(input: CalcInput): SettlementCalculation {
     const pct = parsedTerms?.percentage ?? deal.percentage;
     if (pct == null) return { supported: false, reason: "Missing percentage.", dealType: deal.dealType };
     const payout = grossBoxOffice * pct;
-    const bonusResult = applyBonuses(parseBonuses(deal), { gross: grossBoxOffice, tickets, capacity: venueCapacity });
+    const bonusResult = applyBonuses(legacyBonusesAfterParse(deal, parsedTerms), { gross: grossBoxOffice, tickets, capacity: venueCapacity });
     return {
       supported: true, grossBoxOffice, netBoxOffice, totalExpenses,
       totalToArtist: payout + bonusResult.totalApplied,
@@ -135,7 +151,7 @@ export function calculateSettlement(input: CalcInput): SettlementCalculation {
       }
     }
 
-    const bonusResult = applyBonuses(parseBonuses(deal), { gross: grossBoxOffice, tickets, capacity: venueCapacity });
+    const bonusResult = applyBonuses(legacyBonusesAfterParse(deal, parsedTerms), { gross: grossBoxOffice, tickets, capacity: venueCapacity });
     if (parsedTerms?.bonusThreshold != null && parsedTerms?.bonusAmount != null) {
       if (grossBoxOffice >= parsedTerms.bonusThreshold) {
         bonusResult.applied.push({ label: `Bonus (gross >= $${parsedTerms.bonusThreshold.toLocaleString()})`, amount: parsedTerms.bonusAmount, reason: `From deal notes` });
